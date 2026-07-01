@@ -36,4 +36,29 @@ docs/
 
 ## 数据与后端说明
 
-当前版本为可演示 Web MVP，使用 `localStorage` 保存演示数据，模拟 AI 逻辑位于 `lib/mockAi.ts`。后续接入真实后端时，可按 `docs/database-design.sql` 建表，并把 `localStorage` 读写替换为 API 路由、Supabase、Firebase 或 SQLite。
+当前版本支持两种模式：
+
+- 未配置 Supabase：使用 `localStorage` 保存演示数据。
+- 已配置 Supabase：用户可用邮箱密码注册/登录，任务、个人资料和匹配记录保存到云端数据库。
+
+模拟 AI 逻辑位于 `lib/mockAi.ts`。
+
+## 启用网上注册
+
+1. 在 Supabase 创建项目。
+2. 打开 Supabase SQL Editor，执行 `docs/database-design.sql`。
+3. 在本地复制 `.env.example` 为 `.env.local`，填入：
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=你的 Supabase Project URL
+NEXT_PUBLIC_SUPABASE_ANON_KEY=你的 Supabase anon public key
+```
+
+4. 在 GitHub 仓库 Settings → Secrets and variables → Actions 中添加同名 secrets：
+
+```text
+NEXT_PUBLIC_SUPABASE_URL
+NEXT_PUBLIC_SUPABASE_ANON_KEY
+```
+
+5. 推送到 `main` 后 GitHub Pages 会重新构建，公网版本即可注册/登录。

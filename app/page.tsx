@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import {
   ArrowRight,
   BriefcaseBusiness,
@@ -17,9 +18,11 @@ import {
   X
 } from "lucide-react";
 import { createMatches, generateTaskBreakdown, normalizeSkills } from "@/lib/mockAi";
+import { loadCloudData, saveCloudMatches, saveCloudTalent, saveCloudTask } from "@/lib/cloudStore";
+import { isSupabaseConfigured, supabase } from "@/lib/supabaseClient";
 import { AppData, EnterpriseTask, MatchResult, TalentProfile } from "@/lib/types";
 
-type View = "home" | "post" | "profile" | "market" | "matches" | "admin";
+type View = "home" | "auth" | "post" | "profile" | "market" | "matches" | "admin";
 
 const seedData: AppData = {
   tasks: [
@@ -68,6 +71,8 @@ export default function Home() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [data, setData] = useState<AppData>(hydrateSeed());
   const [selectedTaskId, setSelectedTaskId] = useState(seedData.tasks[0].id);
+  const [session, setSession] = useState<Session | null>(null);
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     const saved = localStorage.getItem("ai-broker-os-data");
@@ -75,8 +80,27 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("ai-broker-os-data", JSON.stringify(data));
+    if (!isSupabaseConfigured) localStorage.setItem("ai-broker-os-data", JSON.stringify(data));
   }, [data]);
+
+  useEffect(() => {
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data: authData }) => setSession(authData.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    loadCloudData()
+      .then((cloudData) => {
+        if (cloudData && (cloudData.tasks.length || cloudData.talents.length || cloudData.matches.length)) {
+          setData(cloudData);
+          setSelectedTaskId(cloudData.tasks[0]?.id ?? selectedTaskId);
+        }
+      })
+      .catch((error) => setNotice(`云端数据读取失败：${error.message}`));
+  }, [session]);
 
   const selectedTask = data.tasks.find((task) => task.id === selectedTaskId) ?? data.tasks[0];
   const selectedMatches = data.matches.filter((match) => match.taskId === selectedTask?.id);
@@ -87,28 +111,48 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function publishTask(task: EnterpriseTask) {
+  async function publishTask(task: EnterpriseTask) {
     const matches = createMatches(task, data.talents);
     setData((current) => ({
       ...current,
       tasks: [task, ...current.tasks],
       matches: [...matches, ...current.matches.filter((match) => match.taskId !== task.id)]
     }));
+    if (session) {
+      try {
+        await saveCloudTask(task);
+        await saveCloudMatches(matches);
+        setNotice("任务已发布到云端，其他登录用户可看到。");
+      } catch (error) {
+        setNotice(`云端保存失败：${error instanceof Error ? error.message : "未知错误"}`);
+      }
+    }
     setSelectedTaskId(task.id);
     navigate("matches");
   }
 
-  function saveTalent(talent: TalentProfile) {
+  async function saveTalent(talent: TalentProfile) {
     const nextTalents = [talent, ...data.talents];
     const nextMatches = data.tasks.flatMap((task) => createMatches(task, nextTalents));
     setData({ ...data, talents: nextTalents, matches: nextMatches });
+    if (session) {
+      try {
+        await saveCloudTalent(talent);
+        await saveCloudMatches(nextMatches);
+        setNotice("个人资料已保存到云端，并重新生成匹配。");
+      } catch (error) {
+        setNotice(`云端保存失败：${error instanceof Error ? error.message : "未知错误"}`);
+      }
+    }
     navigate("market");
   }
 
   return (
     <main className="min-h-screen bg-[#f6f7f9] text-[#17212b]">
-      <Header view={view} navigate={navigate} menuOpen={menuOpen} setMenuOpen={setMenuOpen} />
+      <Header view={view} navigate={navigate} menuOpen={menuOpen} setMenuOpen={setMenuOpen} session={session} />
+      {notice && <div className="mx-auto mt-4 max-w-7xl px-5"><div className="rounded-lg border border-[#b2ddff] bg-[#eff8ff] p-3 text-sm text-[#175cd3]">{notice}</div></div>}
       {view === "home" && <Landing navigate={navigate} />}
+      {view === "auth" && <AuthPage session={session} setNotice={setNotice} />}
       {view === "post" && <TaskPost onSubmit={publishTask} />}
       {view === "profile" && <TalentProfileForm onSubmit={saveTalent} />}
       {view === "market" && <TaskMarket tasks={data.tasks} selectedTaskId={selectedTaskId} setSelectedTaskId={setSelectedTaskId} navigate={navigate} />}
@@ -118,7 +162,7 @@ export default function Home() {
   );
 }
 
-function Header({ view, navigate, menuOpen, setMenuOpen }: { view: View; navigate: (view: View) => void; menuOpen: boolean; setMenuOpen: (open: boolean) => void }) {
+function Header({ view, navigate, menuOpen, setMenuOpen, session }: { view: View; navigate: (view: View) => void; menuOpen: boolean; setMenuOpen: (open: boolean) => void; session: Session | null }) {
   const links: [View, string][] = [["post", "企业发布"], ["profile", "个人资料"], ["market", "任务大厅"], ["matches", "AI 匹配"], ["admin", "管理后台"]];
   return (
     <header className="sticky top-0 z-40 border-b border-[#dde3ea] bg-white/90 backdrop-blur">
@@ -129,11 +173,79 @@ function Header({ view, navigate, menuOpen, setMenuOpen }: { view: View; navigat
         </button>
         <nav className="hidden items-center gap-2 md:flex">
           {links.map(([target, label]) => <button key={target} onClick={() => navigate(target)} className={`nav ${view === target ? "navActive" : ""}`}>{label}</button>)}
+          <button onClick={() => navigate("auth")} className={`nav ${view === "auth" ? "navActive" : ""}`}>{session ? "账号" : "注册/登录"}</button>
         </nav>
         <button className="md:hidden" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X /> : <Menu />}</button>
       </div>
-      {menuOpen && <div className="grid border-t bg-white p-3 md:hidden">{links.map(([target, label]) => <button key={target} className="rounded-lg p-3 text-left" onClick={() => navigate(target)}>{label}</button>)}</div>}
+      {menuOpen && <div className="grid border-t bg-white p-3 md:hidden">{links.map(([target, label]) => <button key={target} className="rounded-lg p-3 text-left" onClick={() => navigate(target)}>{label}</button>)}<button className="rounded-lg p-3 text-left" onClick={() => navigate("auth")}>{session ? "账号" : "注册/登录"}</button></div>}
     </header>
+  );
+}
+
+function AuthPage({ session, setNotice }: { session: Session | null; setNotice: (value: string) => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function signUp() {
+    if (!supabase) {
+      setNotice("还没有配置 Supabase 环境变量，当前只能本地演示。");
+      return;
+    }
+    setLoading(true);
+    const { error } = await supabase.auth.signUp({ email, password });
+    setLoading(false);
+    setNotice(error ? `注册失败：${error.message}` : "注册成功。如果 Supabase 开启邮箱确认，请先去邮箱点击确认链接。");
+  }
+
+  async function signIn() {
+    if (!supabase) {
+      setNotice("还没有配置 Supabase 环境变量，当前只能本地演示。");
+      return;
+    }
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    setLoading(false);
+    setNotice(error ? `登录失败：${error.message}` : "登录成功，之后发布任务和保存资料会写入云端。");
+  }
+
+  async function signOut() {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setNotice("已退出登录。");
+  }
+
+  return (
+    <PageShell eyebrow="ACCOUNT" title="用户注册与登录">
+      <div className="grid gap-6 lg:grid-cols-[.9fr_1.1fr]">
+        <div className="panel p-6">
+          {session ? (
+            <div>
+              <p className="text-sm text-[#667085]">当前登录账号</p>
+              <h2 className="mt-2 text-xl font-semibold">{session.user.email}</h2>
+              <button className="secondary mt-6" onClick={signOut}>退出登录</button>
+            </div>
+          ) : (
+            <div className="grid gap-4">
+              <Field label="邮箱" type="email" value={email} onChange={setEmail} placeholder="name@example.com" />
+              <Field label="密码" type="password" value={password} onChange={setPassword} placeholder="至少 6 位" />
+              <div className="flex flex-wrap gap-3">
+                <button className="primary" disabled={loading || !email || password.length < 6} onClick={signUp}>注册</button>
+                <button className="secondary" disabled={loading || !email || password.length < 6} onClick={signIn}>登录</button>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="panel p-6">
+          <h2 className="text-xl font-semibold">云端注册说明</h2>
+          <div className="mt-4 grid gap-3 text-sm leading-6 text-[#475467]">
+            <p className="rounded-lg bg-[#f8fafc] p-3">配置 Supabase 后，用户可以用邮箱和密码注册。</p>
+            <p className="rounded-lg bg-[#f8fafc] p-3">登录用户发布的任务、个人资料和匹配结果会保存到在线数据库。</p>
+            <p className="rounded-lg bg-[#f8fafc] p-3">未配置 Supabase 时，网站仍可展示，但数据只存在当前浏览器。</p>
+          </div>
+        </div>
+      </div>
+    </PageShell>
   );
 }
 
